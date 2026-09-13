@@ -91,8 +91,37 @@ def latest_artifact() -> str:
     les artefacts des essais précédents, et rien dans un nom d'objet ne dit si le job
     correspondant a réussi.
     """
-    # TODO-D1-01 — à écrire.
-    raise NotImplementedError("TODO-D1-01")
+    sm = config.client("sagemaker")
+
+    # Pagination obligatoire : l'API applique NameContains APRÈS le découpage en pages.
+    # Une page peut donc revenir VIDE avec un NextToken alors que des jobs du groupe
+    # existent plus loin — constaté le 06/08/2026 dès qu'un job `qc-gNN-exo-train-…`
+    # (exercice du J1) devient le job le plus récent du compte.
+    criteres = dict(
+        NameContains=config.resource("train"),
+        StatusEquals="Completed",
+        SortBy="CreationTime",
+        SortOrder="Descending",
+    )
+    dernier = None
+    while True:
+        page = sm.list_training_jobs(**criteres)
+        if page["TrainingJobSummaries"]:
+            dernier = page["TrainingJobSummaries"][0]
+            break
+        jeton = page.get("NextToken")
+        if not jeton:
+            break
+        criteres["NextToken"] = jeton
+
+    if dernier is None:
+        raise InferenceError(
+            "Aucun job d'entraînement réussi pour ce groupe.\n"
+            "  Corriger : lancer `uv run qc train` d'abord."
+        )
+
+    described = sm.describe_training_job(TrainingJobName=dernier["TrainingJobName"])
+    return described["ModelArtifacts"]["S3ModelArtifacts"]
 
 
 #: Où les fichiers extraits de l'artefact sont mis en cache. Le télécharger à chaque
@@ -108,8 +137,41 @@ def artifact_member(filename: str) -> Path:
     a besoin d'aucun — le conteneur les charge lui-même — mais le seuil de décision et
     l'explicabilité (J2) se lisent ici, côté client.
     """
-    # TODO-D1-02 — à écrire.
-    raise NotImplementedError("TODO-D1-02")
+    import tarfile
+    import tempfile
+
+    cache = MODEL_CACHE_DIR / filename
+    if cache.is_file():
+        return cache
+
+    uri = latest_artifact()
+    _, _, reste = uri.partition("s3://")
+    bucket, _, cle = reste.partition("/")
+
+    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz") as archive:
+        try:
+            config.client("s3").download_file(bucket, cle, archive.name)
+        except Exception as exc:  # noqa: BLE001
+            raise InferenceError(
+                f"Artefact du modèle introuvable : {uri}\n"
+                "  Corriger : `uv run qc train` d'abord."
+            ) from exc
+        with tarfile.open(archive.name) as tar:
+            # Tout extraire d'un coup : les trois fichiers viennent toujours ensemble,
+            # et le prochain appel pour un autre membre sera un accès disque.
+            for membre in tar.getmembers():
+                if membre.isfile():
+                    contenu = tar.extractfile(membre)
+                    (MODEL_CACHE_DIR / Path(membre.name).name).write_bytes(contenu.read())
+
+    if not cache.is_file():
+        raise InferenceError(
+            f"L'artefact {uri} ne contient pas {filename}.\n"
+            "  L'entraînement vient-il d'un job antérieur à la migration vers la"
+            " régression logistique ? Relancer `uv run qc train`."
+        )
+    return cache
 
 
 def decision_threshold() -> float:
@@ -119,8 +181,9 @@ def decision_threshold() -> float:
     un livrable de l'entraînement, choisi sur des prédictions de validation, pas une
     constante universelle.
     """
-    # TODO-D1-03 — à écrire.
-    raise NotImplementedError("TODO-D1-03")
+    import json
+
+    return float(json.loads(artifact_member("threshold.json").read_text())["threshold"])
 
 
 def _create_model(artifact: str) -> str:
@@ -132,8 +195,28 @@ def _create_model(artifact: str) -> str:
     output_fn), `SAGEMAKER_SUBMIT_DIRECTORY` pointe l'archive de code sur S3. C'est le
     pendant, en variables d'environnement, des deux hyperparamètres du job d'entraînement.
     """
-    # TODO-D1-04 — à écrire.
-    raise NotImplementedError("TODO-D1-04")
+    name = config.timestamped_name("model")
+    try:
+        config.client("sagemaker").create_model(
+            ModelName=name,
+            PrimaryContainer={
+                "Image": image_uri(),
+                "ModelDataUrl": artifact,
+                "Environment": {
+                    "SAGEMAKER_PROGRAM": SERVE_ENTRY_POINT,
+                    "SAGEMAKER_SUBMIT_DIRECTORY": _upload_sourcedir(),
+                    "SAGEMAKER_REGION": config.region,
+                },
+            },
+            ExecutionRoleArn=config.sagemaker_role_arn,
+            Tags=config.tags_list,
+        )
+    except ClientError as exc:
+        raise InferenceError(
+            f"Création du modèle refusée ({exc.response['Error']['Code']}) :"
+            f" {exc.response['Error']['Message']}"
+        ) from exc
+    return name
 
 
 def _create_endpoint_config(model_name: str) -> tuple[str, str]:
@@ -144,8 +227,40 @@ def _create_endpoint_config(model_name: str) -> tuple[str, str]:
     configuration et mettre l'endpoint à jour — d'où l'insistance du lab à ne pas
     l'oublier, le J3 entier en dépend.
     """
-    # TODO-D1-05 — à écrire.
-    raise NotImplementedError("TODO-D1-05")
+    name = config.timestamped_name("endpoint-config")
+    capture_uri = f"s3://{config.s3_bucket}/{CAPTURE_PREFIX}/"
+    try:
+        config.client("sagemaker").create_endpoint_config(
+            EndpointConfigName=name,
+            ProductionVariants=[
+                {
+                    "VariantName": "AllTraffic",
+                    "ModelName": model_name,
+                    "InitialInstanceCount": INSTANCE_COUNT,
+                    "InstanceType": INSTANCE_TYPE,
+                    "InitialVariantWeight": 1.0,
+                }
+            ],
+            DataCaptureConfig={
+                "EnableCapture": True,
+                "InitialSamplingPercentage": CAPTURE_PERCENTAGE,
+                "DestinationS3Uri": capture_uri,
+                # Les DEUX. Capturer seulement l'entrée priverait le J3 de la
+                # distribution des scores, qui est la dérive la plus visible.
+                "CaptureOptions": [
+                    {"CaptureMode": "Input"},
+                    {"CaptureMode": "Output"},
+                ],
+                "CaptureContentTypeHeader": {"CsvContentTypes": ["text/csv"]},
+            },
+            Tags=config.tags_list,
+        )
+    except ClientError as exc:
+        raise InferenceError(
+            f"Création de la configuration refusée ({exc.response['Error']['Code']}) :"
+            f" {exc.response['Error']['Message']}"
+        ) from exc
+    return name, capture_uri
 
 
 def deploy(artifact: str | None = None) -> Endpoint:
@@ -156,8 +271,36 @@ def deploy(artifact: str | None = None) -> Endpoint:
     le socle porte ce nom, et le J2 comme le J3 doivent pouvoir le retrouver sans le
     chercher. Si l'endpoint existe déjà, il est MIS À JOUR au lieu d'être recréé.
     """
-    # TODO-D1-06 — à écrire.
-    raise NotImplementedError("TODO-D1-06")
+    artifact = artifact or latest_artifact()
+    model_name = _create_model(artifact)
+    config_name, capture_uri = _create_endpoint_config(model_name)
+
+    sm = config.client("sagemaker")
+    name = config.endpoint_name
+    try:
+        sm.create_endpoint(
+            EndpointName=name, EndpointConfigName=config_name, Tags=config.tags_list
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ValidationException" and "already exist" in (
+            exc.response["Error"]["Message"]
+        ):
+            # Deuxième passage : on bascule l'endpoint existant sur la nouvelle
+            # configuration. SageMaker le fait sans coupure de service.
+            sm.update_endpoint(EndpointName=name, EndpointConfigName=config_name)
+        else:
+            raise InferenceError(
+                f"Création de l'endpoint refusée ({exc.response['Error']['Code']}) :"
+                f" {exc.response['Error']['Message']}"
+            ) from exc
+
+    return Endpoint(
+        name=name,
+        model_name=model_name,
+        config_name=config_name,
+        artifact=artifact,
+        capture_uri=capture_uri,
+    )
 
 
 def wait(endpoint_name: str, poll_seconds: int = 20, on_tick=None) -> str:
@@ -167,8 +310,28 @@ def wait(endpoint_name: str, poll_seconds: int = 20, on_tick=None) -> str:
     supprime et se recrée. Le message d'AWS est renvoyé tel quel — il nomme
     généralement la vraie cause, souvent un artefact illisible par le rôle.
     """
-    # TODO-D1-07 — à écrire.
-    raise NotImplementedError("TODO-D1-07")
+    import time
+
+    sm = config.client("sagemaker")
+    started = time.monotonic()
+
+    while True:
+        described = sm.describe_endpoint(EndpointName=endpoint_name)
+        status = described["EndpointStatus"]
+        if status in ("InService", "Failed"):
+            break
+        if on_tick is not None:
+            on_tick(status, int(time.monotonic() - started))
+        time.sleep(poll_seconds)
+
+    if status == "Failed":
+        raise InferenceError(
+            f"L'endpoint {endpoint_name} a échoué.\n"
+            f"  {described.get('FailureReason', 'aucune raison fournie')}\n"
+            "  Un endpoint en échec ne se répare pas : `uv run qc teardown` puis"
+            " redéployer."
+        )
+    return status
 
 
 def predict(rows: list[list[float]], endpoint_name: str | None = None) -> list[Prediction]:
@@ -184,8 +347,33 @@ def predict(rows: list[list[float]], endpoint_name: str | None = None) -> list[P
     pièce défectueuse ne coûte pas la même chose que d'en écarter une bonne — celui
     choisi à l'entraînement se lit par `decision_threshold()`.
     """
-    # TODO-D1-08 — à écrire.
-    raise NotImplementedError("TODO-D1-08")
+    name = endpoint_name or config.endpoint_name
+
+    buffer = io.StringIO()
+    csv.writer(buffer).writerows(rows)
+
+    try:
+        response = config.client("sagemaker-runtime").invoke_endpoint(
+            EndpointName=name, ContentType="text/csv", Body=buffer.getvalue()
+        )
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code == "ValidationError":
+            raise InferenceError(
+                f"L'endpoint {name} n'existe pas ou n'est pas en service.\n"
+                "  Corriger : `uv run qc deploy`."
+            ) from exc
+        if code == "ModelError":
+            raise InferenceError(
+                "Le conteneur a rejeté la requête.\n"
+                f"  {exc.response['Error']['Message']}\n"
+                "  Cause la plus fréquente : un nombre de colonnes différent de celui"
+                " vu à l'entraînement, ou une colonne cible laissée dans les données."
+            ) from exc
+        raise InferenceError(f"Invocation refusée ({code}).") from exc
+
+    body = response["Body"].read().decode("utf-8").strip()
+    return _parse_scores(body)
 
 
 def _parse_scores(body: str) -> list[Prediction]:
@@ -195,8 +383,8 @@ def _parse_scores(body: str) -> list[Prediction]:
     conteneur XGBoost employait pour une ligne unique, et cette souplesse ne coûte
     rien tant que les scores restent des nombres nus.
     """
-    # TODO-D1-09 — à écrire.
-    raise NotImplementedError("TODO-D1-09")
+    valeurs = [v for v in body.replace(",", "\n").split("\n") if v.strip()]
+    return [Prediction(index=i, score=float(v)) for i, v in enumerate(valeurs)]
 
 
 def local_sample() -> Path:
@@ -214,8 +402,12 @@ def local_sample() -> Path:
     Une dépendance invisible entre deux onglets, et une panne qui n'arrive qu'à certains
     binômes.
     """
-    # TODO-D1-10 — à écrire.
-    raise NotImplementedError("TODO-D1-10")
+    chemin = DATA_DIR / "sample.csv"
+    if not chemin.is_file():
+        from qc import storage
+
+        storage.download("sample.csv", chemin)
+    return chemin
 
 
 def read_sample(path: Path) -> tuple[list[str], list[list[float]]]:
@@ -224,8 +416,15 @@ def read_sample(path: Path) -> tuple[list[str], list[list[float]]]:
     L'en-tête est là pour que l'apprenant puisse ouvrir le fichier et comprendre ce
     qu'il envoie ; c'est cette fonction qui le retire avant l'invocation.
     """
-    # TODO-D1-11 — à écrire.
-    raise NotImplementedError("TODO-D1-11")
+    if not path.is_file():
+        raise InferenceError(
+            f"{path} est absent.\n  Corriger : lancer `uv run qc load` d'abord."
+        )
+    with path.open(newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader)
+        rows = [[float(v) for v in row] for row in reader if row]
+    return header, rows
 
 
 def teardown(endpoint_name: str | None = None) -> list[str]:
@@ -237,5 +436,24 @@ def teardown(endpoint_name: str | None = None) -> list[str]:
     Le Model n'est PAS supprimé : il ne coûte rien, et le garder permet de redéployer
     sans réentraîner.
     """
-    # TODO-D1-12 — à écrire.
-    raise NotImplementedError("TODO-D1-12")
+    name = endpoint_name or config.endpoint_name
+    sm = config.client("sagemaker")
+    supprimes: list[str] = []
+
+    try:
+        described = sm.describe_endpoint(EndpointName=name)
+    except ClientError:
+        return supprimes
+
+    sm.delete_endpoint(EndpointName=name)
+    supprimes.append(f"endpoint {name}")
+
+    config_name = described.get("EndpointConfigName")
+    if config_name:
+        try:
+            sm.delete_endpoint_config(EndpointConfigName=config_name)
+            supprimes.append(f"configuration {config_name}")
+        except ClientError:
+            pass
+
+    return supprimes

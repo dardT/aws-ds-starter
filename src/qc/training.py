@@ -119,15 +119,36 @@ class Result:
 
 def image_uri() -> str:
     """URI de l'image SKLearn pour la région du groupe."""
-    # TODO-D1-27 — à écrire.
-    raise NotImplementedError("TODO-D1-27")
+    account = SKLEARN_REGISTRY.get(config.region)
+    if account is None:
+        raise TrainingError(
+            f"Aucun compte d'image SKLearn connu pour {config.region}.\n"
+            "  Corriger : compléter SKLEARN_REGISTRY dans qc/training.py, et VÉRIFIER"
+            " par un `docker pull` réel avant de faire confiance à une table trouvée en"
+            " ligne — voir le commentaire au-dessus de SKLEARN_REGISTRY."
+        )
+    return (
+        f"{account}.dkr.ecr.{config.region}.amazonaws.com/"
+        f"sagemaker-scikit-learn:{SKLEARN_VERSION}-cpu-py3"
+    )
 
 
 def _sourcedir_bytes() -> bytes:
     """Construit l'archive de code (script d'entraînement + de service + le module de
     modélisation) en mémoire, sans rien écrire sur disque."""
-    # TODO-D1-28 — à écrire.
-    raise NotImplementedError("TODO-D1-28")
+    secom_source = importlib.resources.files("qc_optimized").joinpath("secom.py").read_bytes()
+
+    tampon = io.BytesIO()
+    with tarfile.open(fileobj=tampon, mode="w:gz") as archive:
+        for nom, contenu in (
+            (TRAIN_ENTRY_POINT, (_MODEL_ASSETS / TRAIN_ENTRY_POINT).read_bytes()),
+            (SERVE_ENTRY_POINT, (_MODEL_ASSETS / SERVE_ENTRY_POINT).read_bytes()),
+            ("secom_model.py", secom_source),
+        ):
+            info = tarfile.TarInfo(name=nom)
+            info.size = len(contenu)
+            archive.addfile(info, io.BytesIO(contenu))
+    return tampon.getvalue()
 
 
 def _upload_sourcedir() -> str:
@@ -136,8 +157,15 @@ def _upload_sourcedir() -> str:
     Un seul objet, réécrit à chaque appel : contrairement à l'artefact d'un job (qui doit
     rester rejouable), le code est celui qui tourne MAINTENANT — pas besoin d'historique.
     """
-    # TODO-D1-29 — à écrire.
-    raise NotImplementedError("TODO-D1-29")
+    uri = f"s3://{config.s3_bucket}/{CODE_KEY}"
+    config.client("s3").put_object(
+        Bucket=config.s3_bucket,
+        Key=CODE_KEY,
+        Body=_sourcedir_bytes(),
+        ServerSideEncryption="AES256",
+        Tagging="&".join(f"{k}={v}" for k, v in config.tags.items()),
+    )
+    return uri
 
 
 def submit(train_input: str, validation_input: str) -> Job:
@@ -149,8 +177,88 @@ def submit(train_input: str, validation_input: str) -> Job:
     décision ne sont PAS passés en hyperparamètre : le script les calcule lui-même depuis
     le canal `train`, exactement comme le notebook de validation.
     """
-    # TODO-D1-30 — à écrire.
-    raise NotImplementedError("TODO-D1-30")
+    name = config.timestamped_name("train")
+    output_path = f"s3://{config.s3_bucket}/{MODEL_PREFIX}/"
+    sourcedir_uri = _upload_sourcedir()
+
+    def channel(label: str, uri: str) -> dict:
+        return {
+            "ChannelName": label,
+            "ContentType": "text/csv",
+            "DataSource": {
+                "S3DataSource": {
+                    # S3Prefix : SageMaker lit TOUT ce qui se trouve sous l'URI. C'est
+                    # pourquoi `storage.py` isole train.csv et test.csv dans leur propre
+                    # sous-préfixe.
+                    "S3DataType": "S3Prefix",
+                    "S3Uri": uri,
+                    "S3DataDistributionType": "FullyReplicated",
+                }
+            },
+        }
+
+    try:
+        config.client("sagemaker").create_training_job(
+            TrainingJobName=name,
+            AlgorithmSpecification={
+                "TrainingImage": image_uri(),
+                "TrainingInputMode": "File",
+                "MetricDefinitions": METRIC_DEFINITIONS,
+            },
+            RoleArn=config.sagemaker_role_arn,
+            InputDataConfig=[
+                channel("train", train_input),
+                channel("validation", validation_input),
+            ],
+            OutputDataConfig={"S3OutputPath": output_path},
+            ResourceConfig={
+                "InstanceType": INSTANCE_TYPE,
+                "InstanceCount": 1,
+                "VolumeSizeInGB": 5,
+            },
+            StoppingCondition={"MaxRuntimeInSeconds": MAX_RUNTIME_SECONDS},
+            # Contrat classique du sagemaker-training-toolkit, DÉJÀ présent dans le
+            # conteneur SKLearn officiel : ces deux clés lui disent quel script lancer et
+            # où trouver son code. Valeurs JSON-encodées (avec guillemets) : c'est ainsi
+            # que le conteneur les distingue d'une valeur numérique — vérifié le
+            # 29/07/2026 par un job réel, `HyperParameters` vide sinon silencieusement.
+            HyperParameters={
+                "sagemaker_program": f'"{TRAIN_ENTRY_POINT}"',
+                "sagemaker_submit_directory": f'"{sourcedir_uri}"',
+            },
+            Tags=config.tags_list,
+        )
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        message = exc.response["Error"]["Message"]
+        if "ValidationException" in code and "execution role" in message:
+            raise TrainingError(
+                "SageMaker refuse le rôle d'exécution.\n"
+                f"  {config.sagemaker_role_arn}\n"
+                "  Vérifier que sa politique de confiance autorise sagemaker.amazonaws.com.\n"
+                "  Contrôle n°6 du preflight."
+            ) from exc
+        if code == "AccessDeniedException":
+            raise TrainingError(
+                "Vous n'avez pas le droit de soumettre un job d'entraînement, ou pas"
+                " celui de passer ce rôle à SageMaker (iam:PassRole).\n"
+                "  Vérifier : `uv run scripts/preflight.py`."
+            ) from exc
+        if code == "ResourceLimitExceeded":
+            raise TrainingError(
+                f"Quota atteint pour {INSTANCE_TYPE} en entraînement.\n"
+                "  Sur un compte partagé, six binômes qui lancent en même temps"
+                " saturent le quota par défaut.\n"
+                "  Contrôle n°5 du preflight, et demande d'augmentation auprès de l'IT."
+            ) from exc
+        raise TrainingError(f"Soumission refusée ({code}) : {message}") from exc
+
+    return Job(
+        name=name,
+        train_input=train_input,
+        validation_input=validation_input,
+        output_path=output_path,
+    )
 
 
 def wait(job_name: str, poll_seconds: int = 20, on_tick=None) -> Result:
@@ -159,5 +267,29 @@ def wait(job_name: str, poll_seconds: int = 20, on_tick=None) -> Result:
     `on_tick(status, secondes)` est appelé à chaque sondage — c'est par là que `cli.py`
     affiche la progression sans que ce module n'imprime quoi que ce soit lui-même.
     """
-    # TODO-D1-31 — à écrire.
-    raise NotImplementedError("TODO-D1-31")
+    sm = config.client("sagemaker")
+    started = time.monotonic()
+
+    while True:
+        described = sm.describe_training_job(TrainingJobName=job_name)
+        status = described["TrainingJobStatus"]
+        elapsed = int(time.monotonic() - started)
+
+        if status in ("Completed", "Failed", "Stopped"):
+            break
+        if on_tick is not None:
+            on_tick(described.get("SecondaryStatus", status), elapsed)
+        time.sleep(poll_seconds)
+
+    metrics = {
+        m["MetricName"]: float(m["Value"])
+        for m in described.get("FinalMetricDataList", [])
+    }
+    return Result(
+        name=job_name,
+        status=status,
+        seconds=described.get("TrainingTimeInSeconds", elapsed),
+        model_artifact=described.get("ModelArtifacts", {}).get("S3ModelArtifacts", ""),
+        metrics=metrics,
+        failure=described.get("FailureReason", ""),
+    )

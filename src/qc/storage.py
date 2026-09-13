@@ -59,13 +59,12 @@ class Report:
 
     @property
     def total_bytes(self) -> int:
-        # TODO-D1-19 — à écrire.
-        raise NotImplementedError("TODO-D1-19")
+        return sum(u.size for u in self.uploads)
 
     def uri(self, filename: str = "") -> str:
         """URI S3 d'un fichier déposé, ou du préfixe si aucun nom n'est donné."""
-        # TODO-D1-20 — à écrire.
-        raise NotImplementedError("TODO-D1-20")
+        base = f"s3://{self.bucket}/{self.prefix}/"
+        return f"{base}{filename}" if filename else base
 
     @property
     def training_input(self) -> str:
@@ -76,8 +75,7 @@ class Report:
         avaler `sample.csv` et `timeline.csv` au job, qui échouerait sur un nombre
         de colonnes inattendu.
         """
-        # TODO-D1-21 — à écrire.
-        raise NotImplementedError("TODO-D1-21")
+        return f"s3://{self.bucket}/{self.prefix}/train/"
 
     def summary(self) -> str:
         lines = [f"{len(self.uploads)} fichiers déposés dans {self.uri()}"]
@@ -94,8 +92,10 @@ def _key(filename: str) -> str:
     SageMaker consomme un préfixe entier. Les deux autres restent à plat : ils ne
     sont jamais lus par un job, seulement par nous.
     """
-    # TODO-D1-22 — à écrire.
-    raise NotImplementedError("TODO-D1-22")
+    stem = filename.removesuffix(".csv")
+    if stem in ("train", "test"):
+        return f"{PREFIX}/{stem}/{filename}"
+    return f"{PREFIX}/{filename}"
 
 
 def upload(source: Path, files: tuple[str, ...] = EXPECTED) -> Report:
@@ -105,8 +105,57 @@ def upload(source: Path, files: tuple[str, ...] = EXPECTED) -> Report:
     si S3 refuse. L'erreur la plus fréquente ici n'est pas technique : c'est d'avoir
     sauté l'étape `load`.
     """
-    # TODO-D1-23 — à écrire.
-    raise NotImplementedError("TODO-D1-23")
+    missing = [f for f in files if not (source / f).is_file()]
+    if missing:
+        raise StorageError(
+            f"Fichiers absents de {source} : {', '.join(missing)}.\n"
+            "  Corriger : lancer `uv run qc load` d'abord."
+        )
+
+    s3 = config.client("s3")
+    bucket = config.s3_bucket
+    uploads: list[Upload] = []
+
+    for filename in files:
+        path = source / filename
+        key = _key(filename)
+        try:
+            s3.upload_file(
+                str(path),
+                bucket,
+                key,
+                # Les tags obligatoires (§11) ne se propagent pas tout seuls aux objets :
+                # `default_tags` de Terraform ne couvre que les ressources qu'il crée.
+                # Sans ceci, `make destroy` ne saurait pas que ces objets sont à lui.
+                ExtraArgs={
+                    "ServerSideEncryption": "AES256",
+                    "Tagging": "&".join(f"{k}={v}" for k, v in config.tags.items()),
+                },
+            )
+        except ClientError as exc:
+            code = exc.response["Error"]["Code"]
+            if code in ("AccessDenied", "AllAccessDisabled"):
+                raise StorageError(
+                    f"S3 refuse l'écriture de {key} dans {bucket}.\n"
+                    "  Deux causes possibles, et une seule est la vôtre :\n"
+                    "  - S3_BUCKET dans .env ne désigne pas le bucket de VOTRE groupe ;\n"
+                    "  - vos credentials ont expiré.\n"
+                    "  Vérifier : `uv run scripts/preflight.py`, contrôle n°4."
+                ) from exc
+            if code in ("NoSuchBucket", "404"):
+                raise StorageError(
+                    f"Le bucket {bucket} n'existe pas.\n"
+                    "  Corriger : `make env-from-tf TEAM_ID=<votre groupe>` après"
+                    " application du socle."
+                ) from exc
+            raise StorageError(f"S3 a refusé {key} ({code}).") from exc
+
+        head = s3.head_object(Bucket=bucket, Key=key)
+        uploads.append(
+            Upload(key=key, size=head["ContentLength"], etag=head["ETag"].strip('"'))
+        )
+
+    return Report(bucket=bucket, prefix=PREFIX, uploads=tuple(uploads))
 
 
 def download(filename: str, destination: Path) -> Path:
@@ -120,8 +169,16 @@ def download(filename: str, destination: Path) -> Path:
     L'application va donc les chercher dans S3 au démarrage. C'est aussi ce que fait un
     vrai service : le conteneur est sans état, les données vivent ailleurs.
     """
-    # TODO-D1-24 — à écrire.
-    raise NotImplementedError("TODO-D1-24")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        config.client("s3").download_file(config.s3_bucket, _key(filename), str(destination))
+    except ClientError as exc:
+        raise StorageError(
+            f"{filename} introuvable dans s3://{config.s3_bucket}/{PREFIX}/.\n"
+            f"  ({exc.response['Error']['Code']})\n"
+            "  Corriger : `uv run qc load` puis `uv run qc upload`."
+        ) from exc
+    return destination
 
 
 def verify(report: Report) -> list[str]:
@@ -131,8 +188,23 @@ def verify(report: Report) -> list[str]:
     un job d'entraînement qui démarre sur un objet tronqué échoue vingt minutes plus
     tard sur un message qui ne parle pas du fichier.
     """
-    # TODO-D1-25 — à écrire.
-    raise NotImplementedError("TODO-D1-25")
+    s3 = config.client("s3")
+    anomalies: list[str] = []
+
+    for u in report.uploads:
+        try:
+            head = s3.head_object(Bucket=report.bucket, Key=u.key)
+        except ClientError as exc:
+            anomalies.append(f"{u.key} : introuvable ({exc.response['Error']['Code']})")
+            continue
+        if head["ContentLength"] != u.size:
+            anomalies.append(
+                f"{u.key} : {head['ContentLength']} octets relus contre {u.size} déposés"
+            )
+        if head.get("ServerSideEncryption") != "AES256":
+            anomalies.append(f"{u.key} : chiffrement au repos absent")
+
+    return anomalies
 
 
 def probe_isolation(other_team: str) -> str:
@@ -142,5 +214,21 @@ def probe_isolation(other_team: str) -> str:
     le résultat : un binôme qui a lu la politique IAM sans la voir agir n'en retient
     rien. Ne lève jamais — un refus est ici le comportement ATTENDU, pas une panne.
     """
-    # TODO-D1-26 — à écrire.
-    raise NotImplementedError("TODO-D1-26")
+    target = f"qc-{other_team}-data-{config.account_suffix}"
+    try:
+        config.client("s3").list_objects_v2(Bucket=target, MaxKeys=1)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in ("AccessDenied", "AllAccessDisabled"):
+            return (
+                f"Refusé sur {target} — c'est le résultat attendu.\n"
+                "  La politique IAM du groupe est scopée à son seul bucket."
+            )
+        return f"{target} : {code}"
+    return (
+        f"LECTURE RÉUSSIE sur {target}.\n"
+        "  Attendu SI vous exécutez ceci sous une identité de formateur — un rôle SSO\n"
+        "  d'administration n'est pas contraint par le scopage de préfixe.\n"
+        "  Depuis la machine de travail d'un binôme, en revanche, ce résultat signale\n"
+        "  que le profil d'instance n'est pas scopé : prévenir le formateur."
+    )

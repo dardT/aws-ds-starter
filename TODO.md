@@ -1,42 +1,6 @@
 # TODO du starter
 
 
-## D1
-
-| TODO | Fichier | Fonction |
-| --- | --- | --- |
-| `TODO-D1-01` | `src/qc/inference.py` | `latest_artifact` |
-| `TODO-D1-02` | `src/qc/inference.py` | `artifact_member` |
-| `TODO-D1-03` | `src/qc/inference.py` | `decision_threshold` |
-| `TODO-D1-04` | `src/qc/inference.py` | `_create_model` |
-| `TODO-D1-05` | `src/qc/inference.py` | `_create_endpoint_config` |
-| `TODO-D1-06` | `src/qc/inference.py` | `deploy` |
-| `TODO-D1-07` | `src/qc/inference.py` | `wait` |
-| `TODO-D1-08` | `src/qc/inference.py` | `predict` |
-| `TODO-D1-09` | `src/qc/inference.py` | `_parse_scores` |
-| `TODO-D1-10` | `src/qc/inference.py` | `local_sample` |
-| `TODO-D1-11` | `src/qc/inference.py` | `read_sample` |
-| `TODO-D1-12` | `src/qc/inference.py` | `teardown` |
-| `TODO-D1-13` | `src/qc/secom.py` | `Dataset.fail_rate` |
-| `TODO-D1-14` | `src/qc/secom.py` | `Split.write_csv` |
-| `TODO-D1-15` | `src/qc/secom.py` | `load` |
-| `TODO-D1-16` | `src/qc/secom.py` | `select_features` |
-| `TODO-D1-17` | `src/qc/secom.py` | `frozen_features` |
-| `TODO-D1-18` | `src/qc/secom.py` | `split` |
-| `TODO-D1-19` | `src/qc/storage.py` | `Report.total_bytes` |
-| `TODO-D1-20` | `src/qc/storage.py` | `Report.uri` |
-| `TODO-D1-21` | `src/qc/storage.py` | `Report.training_input` |
-| `TODO-D1-22` | `src/qc/storage.py` | `_key` |
-| `TODO-D1-23` | `src/qc/storage.py` | `upload` |
-| `TODO-D1-24` | `src/qc/storage.py` | `download` |
-| `TODO-D1-25` | `src/qc/storage.py` | `verify` |
-| `TODO-D1-26` | `src/qc/storage.py` | `probe_isolation` |
-| `TODO-D1-27` | `src/qc/training.py` | `image_uri` |
-| `TODO-D1-28` | `src/qc/training.py` | `_sourcedir_bytes` |
-| `TODO-D1-29` | `src/qc/training.py` | `_upload_sourcedir` |
-| `TODO-D1-30` | `src/qc/training.py` | `submit` |
-| `TODO-D1-31` | `src/qc/training.py` | `wait` |
-
 ## D2
 
 | TODO | Fichier | Fonction |
