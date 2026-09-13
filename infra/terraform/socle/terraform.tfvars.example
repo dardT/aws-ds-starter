@@ -1,0 +1,25 @@
+# Copier en terraform.tfvars et adapter. Le fichier .tfvars est ignoré par git.
+
+region      = "eu-west-3"
+project     = "aws-ds"
+owner_email = "prenom.nom@exemple.fr"
+
+# Décision D1 : le nombre de binômes n'est pas figé dans le code.
+# Ajouter un groupe la veille = ajouter une entrée ici, puis `make socle-apply`.
+#
+# Promo l'entreprise : 14 apprenants en binômes = 7 groupes (g01-g07). g08 sert au formateur
+# prestataire, g09 au rattrapage d'un binôme en retard.
+teams = ["g01", "g02", "g03", "g04", "g05", "g06", "g07", "g08", "g09"]
+
+# Sous-ensemble des machines à démarrer quand create_workstations = true.
+# null = toutes. Pendant la formation : tout sauf g09 (rattrapage), qu'on allume
+# à la demande. Pour un test à une seule machine : ["g01"].
+workstation_teams = ["g01", "g02", "g03", "g04", "g05", "g06", "g07", "g08"]
+
+# Rétentions. Celle des logs est aussi ce que les binômes modifient au J3.
+log_retention_days  = 7
+data_retention_days = 30
+
+# Décision D14 : seul modèle réellement activé dans le compte. Sert à borner la
+# politique IAM plutôt que d'ouvrir bedrock:InvokeModel sur "*".
+bedrock_model_id = "mistral.mistral-large-2402-v1:0"

@@ -1,0 +1,32 @@
+# CI du starter — générée par make_starter.py, ne pas éditer à la main.
+#
+# Pas de pytest ici : les tests de ce dépôt sont l'ÉNONCÉ des TODO, ils échouent par
+# construction tant que le code n'est pas écrit. Lancez-les en local :
+#
+#     uv run pytest
+#
+# Un échec y nomme la tâche à faire (TODO.md).
+name: ci
+on:
+  push: {branches: [main]}
+  pull_request: {}
+jobs:
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.15"
+          terraform_wrapper: false
+      - uses: astral-sh/setup-uv@v5
+      - name: Format Terraform
+        run: terraform fmt -check -recursive infra/terraform
+      - name: Validité des modules
+        run: |
+          for module in infra/terraform/bootstrap infra/terraform/socle infra/terraform/team; do
+            terraform -chdir="$module" init -backend=false -input=false > /dev/null
+            terraform -chdir="$module" validate
+          done
+      - name: Lint IAM
+        run: uv run scripts/lint_iam.py

@@ -1,0 +1,71 @@
+[project]
+name = "aws-ds"
+version = "0.1.0"
+description = "Formation AWS pour Data Scientists — dépôt de travail"
+readme = "README.md"
+
+# §11 impose Python 3.11. uv télécharge et gère cet interpréteur : la version livrée par
+# la distribution (3.13 sur Arch, 3.12 sur Ubuntu, 3.9 sur Amazon Linux) n'intervient pas.
+requires-python = ">=3.11,<3.12"
+
+# Stack technique imposée (§11). Source de vérité des dépendances : `requirements.txt`
+# est désormais un artefact GÉNÉRÉ depuis ce bloc par `make lock`, conservé pour la
+# traçabilité demandée par §13.
+dependencies = [
+    # AWS. Volontairement PAS le SDK `sagemaker` : tout passe par boto3 — l'API brute
+    # montre ce qui part sur le réseau, et le SDK v3 tirait torch et toute la pile
+    # sagemaker-serve dans le conteneur du J2 sans qu'aucun lab ne s'en serve.
+    "boto3>=1.35",
+    # Données et modèle
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "ucimlrepo>=0.0.7",
+    # Application
+    "streamlit>=1.38",
+    # Contrôle n°6 du J2 : demander la page à l'ALB. C'est le seul moyen de distinguer
+    # une tâche saine d'une application réellement servie.
+    "requests>=2.32",
+    # Agent — voir décision D15 : BedrockModel doit être instancié avec streaming=False
+    "strands-agents>=0.1",
+    "strands-agents-tools>=0.1",
+    # Monitoring
+    "evidently>=0.4",
+    "mlflow>=2.16",
+    # Indispensable et absent de §11 : sans ce plugin, le client MLflow ne parle pas
+    # au tracking server managé de SageMaker et le lab 6 du J3 échoue (décision D8).
+    "sagemaker-mlflow>=0.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+# Uniquement pour les notebooks d'exploration (comparaison XGBoost, valeurs SHAP).
+# Hors des dépendances d'exécution : le fil rouge est une régression logistique, et ces
+# paquets n'ont rien à faire dans le conteneur du J2. `uv sync --group notebooks`.
+notebooks = ["xgboost>=2.1", "shap>=0.46", "euporie>=2.10.4", "ipykernel>=6.29", "nbclient>=0.10"]
+
+# Commande unique. Les apprenants font grandir le paquet et lancent `uv run qc <étape>` ;
+# aucun fichier ne s'exécute par son chemin, donc aucun bricolage de sys.path.
+[project.scripts]
+qc = "qc.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Disposition `src/` : le paquet n'est importable qu'une fois installé. Les tests testent
+# donc ce qui est livré, et non l'arborescence source — un fichier oublié dans le wheel
+# se voit immédiatement au lieu de passer inaperçu jusqu'au poste d'un apprenant.
+[tool.hatch.build.targets.wheel]
+packages = ["src/qc", "src/qc_optimized"]
+
+# Le SDK SageMaker v3 dépend de `sagemaker-serve`, qui dépend de `torch`. Sur Linux, la
+# roue torch par défaut embarque tout le toolkit CUDA : l'environnement passe de ~1 Go à
+# plus de 6 Go. Or rien dans la formation n'utilise de GPU — le modèle est un XGBoost sur
+# 1567 lignes, et §11 ne demande aucun calcul accéléré.
+#
+# On force donc la variante CPU. Gain direct sur le temps de build de la golden AMI et sur
+# le `uv sync` d'une workstation neuve.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Pas de `pythonpath` : avec la disposition src/, les tests importent le paquet installé.

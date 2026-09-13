@@ -1,0 +1,31 @@
+# Ce qui ne doit JAMAIS entrer dans l'image.
+#
+# .env en tête : il peut contenir des credentials, et une image poussée dans ECR est
+# lisible par quiconque peut la tirer. La tâche prend son identité du rôle applicatif,
+# elle n'a besoin d'aucune clé.
+.env
+.env.*
+
+.git
+.github
+.terraform
+*.tfstate*
+backend.hcl
+*.tfvars
+
+# Régénérés à l'exécution, et volumineux
+data/
+notebooks/
+reports/
+.qc-state.json
+
+# Inutiles dans l'image, et ils invalident le cache de couches à chaque modification
+docs/
+slides/
+tests/
+infra/
+scripts/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

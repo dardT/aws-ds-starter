@@ -1,0 +1,16 @@
+# Copier en terraform.tfvars et renseigner.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars est ignoré par git : il contient l'identifiant du compte, via le nom
+# du bucket d'état.
+
+team_id      = "g01"
+owner_email  = "prenom.nom@entreprise.fr"
+state_bucket = "qc-promo-tfstate-<suffixe>"
+
+# Valeurs par défaut, modifiées au J3 pour observer leur effet :
+# desired_count      = 1
+# task_cpu           = 512
+# task_memory        = 1024
+# log_retention_days = 7

@@ -1,0 +1,49 @@
+# Secrets — ne JAMAIS committer
+.env
+.env.*
+!.env.example
+
+# AWS
+.aws/
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+# Configuration de backend : contient un identifiant de compte et se régénère
+# en une commande (`make bootstrap-apply`).
+backend.hcl
+
+# Données SECOM — jamais committées (§13), régénérées par `uv run qc load`
+data/
+*.csv
+!tests/fixtures/*.csv
+
+# Tableau d'avancement local du binôme
+.qc-state.json
+.qc-chaos.json
+
+# Artefacts
+model.tar.gz
+*.joblib
+mlruns/
+reports/
+
+# Rapports générés
+preflight-report.md
+discovery-report.md
+
+# Worktrees créés par l'outillage local
+.claude/worktrees/
+.claude/settings.local.json

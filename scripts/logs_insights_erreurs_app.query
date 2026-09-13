@@ -1,0 +1,14 @@
+# Logs Insights — les erreurs applicatives d'un groupe, les plus récentes d'abord.
+#
+# Groupe de logs à sélectionner dans la console : /ecs/qc-<TEAM_ID>-app
+# (et /aws/sagemaker/Endpoints/qc-<TEAM_ID>-endpoint pour le versant endpoint).
+#
+# Compagnon du dashboard qc-<TEAM_ID>-dashboard (make dashboard) : le dashboard dit
+# QUAND ça casse, cette requête dit QUOI — la trace Python, l'AccessDenied, le capteur
+# manquant. C'est la requête à dégainer au J3 quand RunningTaskCount plonge ou que les
+# 4XX montent.
+
+fields @timestamp, @logStream, @message
+| filter @message like /(?i)(error|exception|traceback|denied|refused)/
+| sort @timestamp desc
+| limit 50
