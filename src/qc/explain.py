@@ -50,8 +50,7 @@ class Contribution:
 
     @property
     def sens(self) -> str:
-        # TODO-D2-07 — à écrire.
-        raise NotImplementedError("TODO-D2-07")
+        return "vers NON CONFORME" if self.poids > 0 else "vers conforme"
 
 
 @dataclass(frozen=True)
@@ -75,8 +74,7 @@ class Explication:
         oublié. Un graphique d'importance globale, lui, ne s'additionne pas et ne se
         rapporte à aucune pièce en particulier.
         """
-        # TODO-D2-08 — à écrire.
-        raise NotImplementedError("TODO-D2-08")
+        return self.biais + sum(c.poids for c in self.contributions)
 
     def summary(self, top_n: int = TOP_N) -> str:
         """Les `top_n` contributions les plus fortes — l'affichage, pas le calcul."""
@@ -96,8 +94,21 @@ def load_model():
     Pour EXPLIQUER, il faut le modèle lui-même — l'endpoint ne renvoie qu'un score, il ne
     décompose rien. C'est une différence de fond entre prédire et expliquer.
     """
-    # TODO-D2-09 — à écrire.
-    raise NotImplementedError("TODO-D2-09")
+    import warnings
+
+    import joblib
+
+    from qc import inference
+
+    # L'artefact est picklé par le scikit-learn 1.2 du conteneur, relu ici par une
+    # version plus récente : sklearn émet un InconsistentVersionWarning à chaque
+    # chargement. Il est sans objet dans ce module — `explain_row` ne lit que des
+    # attributs ajustés (statistics_, mean_, scale_, coef_), jamais de méthode — et le
+    # laisser passer noierait la trace de l'agent et la sortie du CLI.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*InconsistentVersion.*")
+        warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+        return joblib.load(inference.artifact_member("model.joblib"))
 
 
 def explain_row(
@@ -110,5 +121,49 @@ def explain_row(
     statistiques du train), puis produit par les coefficients. Une pièce parfaitement
     moyenne a toutes ses contributions à zéro — il ne reste que le biais.
     """
-    # TODO-D2-10 — à écrire.
-    raise NotImplementedError("TODO-D2-10")
+    import numpy
+
+    if len(mesures) != len(noms):
+        raise ExplainError(
+            f"{len(mesures)} mesures pour {len(noms)} noms de colonnes.\n"
+            "  Les deux doivent venir du même échantillon."
+        )
+
+    model = model if model is not None else load_model()
+    try:
+        imputer = model.named_steps["imputer"]
+        scaler = model.named_steps["scaler"]
+        logistic = model.named_steps["model"]
+    except (AttributeError, KeyError) as exc:
+        raise ExplainError(
+            "L'artefact chargé n'est pas le pipeline attendu"
+            " (imputer → scaler → model).\n"
+            "  L'entraînement vient-il d'un job antérieur à la migration ?"
+            " Relancer `uv run qc train`."
+        ) from exc
+
+    # Les trois étages sont rejoués à partir des PARAMÈTRES ajustés (statistics_,
+    # mean_, scale_, coef_), jamais en appelant transform() : l'artefact est picklé par
+    # le scikit-learn 1.2 du conteneur, et les méthodes d'une version plus récente
+    # attendent des attributs internes que ce pickle n'a pas — constaté le 29/07/2026,
+    # `AttributeError: '_fill_dtype'` sous 1.9. Les attributs ajustés, eux, font partie
+    # du contrat public et traversent les versions.
+    ligne = numpy.array(mesures, dtype=float)
+    imputee = numpy.where(numpy.isnan(ligne), imputer.statistics_, ligne)
+    standardisee = (imputee - scaler.mean_) / scaler.scale_
+    poids = logistic.coef_[0] * standardisee
+    biais = float(logistic.intercept_[0])
+
+    # Tri par poids absolu décroissant, SANS troncature : couper ici casserait
+    # l'additivité de `total` (revue du 29/07/2026, point 4 — 32 % d'écart sur la
+    # première pièce de l'échantillon). Le top-5 est l'affaire de `summary()`.
+    ordre = sorted(range(len(poids)), key=lambda i: abs(poids[i]), reverse=True)
+
+    return Explication(
+        indice=indice,
+        contributions=tuple(
+            Contribution(nom=noms[i], valeur=float(mesures[i]), poids=float(poids[i]))
+            for i in ordre
+        ),
+        biais=biais,
+    )

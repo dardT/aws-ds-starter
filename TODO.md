@@ -1,21 +1,6 @@
 # TODO du starter
 
 
-## D2
-
-| TODO | Fichier | Fonction |
-| --- | --- | --- |
-| `TODO-D2-01` | `app/main.py` | `_echantillon` |
-| `TODO-D2-02` | `src/qc/agent.py` | `_est_un_appel_en_texte` |
-| `TODO-D2-03` | `src/qc/agent.py` | `Trace.a_consulte_le_modele` |
-| `TODO-D2-04` | `src/qc/agent.py` | `_outils` |
-| `TODO-D2-05` | `src/qc/agent.py` | `build` |
-| `TODO-D2-06` | `src/qc/agent.py` | `ask` |
-| `TODO-D2-07` | `src/qc/explain.py` | `Contribution.sens` |
-| `TODO-D2-08` | `src/qc/explain.py` | `Explication.total` |
-| `TODO-D2-09` | `src/qc/explain.py` | `load_model` |
-| `TODO-D2-10` | `src/qc/explain.py` | `explain_row` |
-
 ## D3
 
 | TODO | Fichier | Fonction |

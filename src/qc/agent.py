@@ -68,8 +68,9 @@ def _est_un_appel_en_texte(reponse: str) -> bool:
     JSON en guise de réponse. Ça survient surtout sur les questions qui enchaînent
     plusieurs outils.
     """
-    # TODO-D2-02 — à écrire.
-    raise NotImplementedError("TODO-D2-02")
+    return '"name"' in reponse and '"arguments"' in reponse and (
+        '[{' in reponse or '{"' in reponse
+    )
 
 
 class AgentError(RuntimeError):
@@ -91,8 +92,7 @@ class Trace:
 
     @property
     def a_consulte_le_modele(self) -> bool:
-        # TODO-D2-03 — à écrire.
-        raise NotImplementedError("TODO-D2-03")
+        return "predire_conformite" in self.outils_appeles
 
     def summary(self) -> str:
         outils = ", ".join(self.outils_appeles) if self.outils_appeles else "aucun"
@@ -109,8 +109,119 @@ class Trace:
 
 def _outils(appeles: list[str]):
     """Construit les outils, en enregistrant leurs appels dans `appeles`."""
-    # TODO-D2-04 — à écrire.
-    raise NotImplementedError("TODO-D2-04")
+    from strands import tool
+
+    @tool
+    def predire_conformite(indices: list[int]) -> str:
+        """Interroge le modèle de contrôle qualité sur des pièces de l'échantillon.
+
+        Args:
+            indices: Numéros des pièces à évaluer, à partir de 0.
+        """
+        appeles.append("predire_conformite")
+        from qc import inference
+
+        _, lignes = inference.read_sample(inference.local_sample())
+
+        hors_bornes = [i for i in indices if i < 0 or i >= len(lignes)]
+        if hors_bornes:
+            return (
+                f"Pièces inexistantes : {hors_bornes}. "
+                f"L'échantillon contient les pièces 0 à {len(lignes) - 1}."
+            )
+
+        predictions = inference.predict([lignes[i] for i in indices])
+        # Le seuil vient de l'artefact d'entraînement (F2 sur le train). Le donner au
+        # modèle dans la réponse de l'outil lui évite d'en inventer un.
+        seuil = inference.decision_threshold()
+        lignes_reponse = [f"seuil de décision : {seuil:.2f}"]
+        lignes_reponse += [
+            f"pièce {indices[p.index]} : score {p.score:.4f} ({p.label(seuil)})"
+            for p in predictions
+        ]
+        return "\n".join(lignes_reponse)
+
+    @tool
+    def lire_mesures(indice: int, nombre: int = 5) -> str:
+        """Donne les premières mesures capteurs d'une pièce de l'échantillon.
+
+        Args:
+            indice: Numéro de la pièce, à partir de 0.
+            nombre: Combien de mesures retourner.
+        """
+        appeles.append("lire_mesures")
+        from qc import inference
+
+        entete, lignes = inference.read_sample(inference.local_sample())
+        if indice < 0 or indice >= len(lignes):
+            return f"Pièce inexistante. L'échantillon contient les pièces 0 à {len(lignes) - 1}."
+
+        return "\n".join(
+            f"{nom} = {valeur:.4f}"
+            for nom, valeur in list(zip(entete, lignes[indice]))[:nombre]
+        )
+
+    @tool
+    def comparer_a_l_echantillon(indice: int) -> str:
+        """Situe une pièce par rapport aux autres pièces de l'échantillon.
+
+        Args:
+            indice: Numéro de la pièce, à partir de 0.
+        """
+        appeles.append("comparer_a_l_echantillon")
+        from qc import inference
+
+        _, lignes = inference.read_sample(inference.local_sample())
+        if indice < 0 or indice >= len(lignes):
+            return f"Pièce inexistante. L'échantillon contient les pièces 0 à {len(lignes) - 1}."
+
+        predictions = inference.predict(lignes)
+        scores = sorted((p.score for p in predictions), reverse=True)
+        cible = predictions[indice].score
+        rang = scores.index(cible) + 1
+
+        return (
+            f"Pièce {indice} : score {cible:.4f}, rang {rang} sur {len(scores)} "
+            f"(le plus élevé est {scores[0]:.4f}, le plus faible {scores[-1]:.4f})."
+        )
+
+    @tool
+    def expliquer_le_score(indice: int) -> str:
+        """Dit quelles mesures pèsent dans le score d'une pièce, et dans quel sens.
+
+        SEULE source valable pour justifier ou expliquer un score : les noms de capteurs
+        et leurs contributions viennent d'ici, jamais d'ailleurs. À appeler pour toute
+        question du type « pourquoi », « justifie », « quels capteurs ».
+
+        Args:
+            indice: Numéro de la pièce, à partir de 0.
+        """
+        appeles.append("expliquer_le_score")
+        from qc import explain, inference
+
+        entete, lignes = inference.read_sample(inference.local_sample())
+        if indice < 0 or indice >= len(lignes):
+            return f"Pièce inexistante. L'échantillon contient les pièces 0 à {len(lignes) - 1}."
+
+        # L'explication a besoin du modèle lui-même, pas de l'endpoint : elle télécharge
+        # l'artefact du dernier entraînement. Cet appel peut échouer là où les trois
+        # autres outils réussissent — droits SageMaker manquants sur ListTrainingJobs,
+        # artefact absent, pipeline illisible par joblib.
+        #
+        # La capture est VOLONTAIREMENT large. Un tool use est la frontière où une
+        # exception ne sert à personne : elle remonte dans la boucle Strands sous forme
+        # de trace Python, que le modèle ne sait pas exploiter. Les trois échecs ci-dessus
+        # lèvent trois types différents — ExplainError, ClientError de botocore, une
+        # erreur de désérialisation joblib — et les énumérer laisserait toujours passer
+        # le quatrième.
+        try:
+            explication = explain.explain_row(lignes[indice], entete, indice=indice)
+        except Exception as exc:  # noqa: BLE001
+            return f"Explication indisponible : {type(exc).__name__} — {exc}"
+
+        return explication.summary()
+
+    return [predire_conformite, lire_mesures, comparer_a_l_echantillon, expliquer_le_score]
 
 
 # --------------------------------------------------------------------------- agent
@@ -122,11 +233,124 @@ def build(appeles: list[str] | None = None):
     Séparé de `ask()` pour que l'application Streamlit le construise une fois au
     démarrage plutôt qu'à chaque question : la construction ouvre une session boto3.
     """
-    # TODO-D2-05 — à écrire.
-    raise NotImplementedError("TODO-D2-05")
+    try:
+        from strands import Agent
+        from strands.models import BedrockModel
+    except ImportError as exc:
+        raise AgentError(
+            "Le SDK Strands n'est pas installé.\n"
+            "  Corriger : `make sync`, qui installe depuis uv.lock."
+        ) from exc
+
+    if not config.bedrock_model_id:
+        raise AgentError(
+            "BEDROCK_MODEL_ID est vide dans .env.\n"
+            "  Valeur attendue : mistral.mistral-large-2402-v1:0 (décision D14)."
+        )
+
+    appeles = appeles if appeles is not None else []
+    objet = Agent(
+        model=BedrockModel(
+            model_id=config.bedrock_model_id,
+            region_name=config.region,
+            # D15 : en streaming, le tool use casse sur ce modèle. L'agent répond alors
+            # sans jamais appeler d'outil, ce qui ressemble à un modèle peu coopératif
+            # plutôt qu'à un défaut de configuration.
+            streaming=False,
+            temperature=TEMPERATURE,
+            max_tokens=config.bedrock_max_tokens,
+        ),
+        tools=_outils(appeles),
+        system_prompt=SYSTEM_PROMPT,
+        # Par défaut, Strands imprime la réponse et chaque appel d'outil sur la sortie
+        # standard. Le module deviendrait bavard, la trace de `check_day2` illisible, et
+        # l'application Streamlit afficherait sa réponse deux fois. On récupère le texte
+        # par la valeur de retour, pas par ce qui a été imprimé.
+        callback_handler=None,
+    )
+
+    # La liste des appels est attachée à l'agent. Sans cela, `ask(agent=objet)` ne peut
+    # pas la retrouver : il en crée une nouvelle, que les outils n'alimentent jamais, et
+    # renvoie une trace VIDE alors que des outils ont bel et bien été appelés.
+    #
+    # Conséquence si on ne le fait pas : l'application affiche « aucun outil appelé » et
+    # avertit que la réponse est inventée, sur une réponse parfaitement fondée. C'est
+    # l'inverse exact de ce que la trace doit servir à détecter.
+    objet._qc_appels = appeles
+    return objet
 
 
 def ask(question: str, agent=None) -> Trace:
     """Pose une question à l'agent et renvoie sa réponse avec les outils appelés."""
-    # TODO-D2-06 — à écrire.
-    raise NotImplementedError("TODO-D2-06")
+    if agent is None:
+        appeles: list[str] = []
+        agent = build(appeles)
+    else:
+        # Agent construit par l'appelant — l'application Streamlit le fait une fois au
+        # démarrage. On récupère SA liste d'appels, pas une neuve.
+        appeles = getattr(agent, "_qc_appels", [])
+        appeles.clear()
+
+        # Chaque question repart d'une conversation VIERGE.
+        #
+        # Mesuré le 28/07/2026 : sur une question de suivi (« Et la pièce 17 ? »), le
+        # modèle réutilise le format de la réponse précédente et énonce un score SANS
+        # appeler l'outil — 0,1248 annoncé là où l'endpoint renvoie 0,4642. Le garde-fou
+        # du prompt système ne tient plus une fois l'historique chargé d'exemples.
+        #
+        # L'interface ne montre pas de conversation, juste une question et une réponse :
+        # la rendre sans état correspond à ce que l'utilisateur voit, et supprime le
+        # problème au lieu de le rattraper.
+        if hasattr(agent, "messages"):
+            agent.messages.clear()
+
+    try:
+        reponse = agent(question)
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        if "AccessDenied" in message or "not authorized" in message:
+            raise AgentError(
+                f"Bedrock refuse le modèle {config.bedrock_model_id}.\n"
+                "  L'accès au modèle se demande dans la console Bedrock, et la présence\n"
+                "  au catalogue ne vaut pas accès (décision D6).\n"
+                "  Vérifier : contrôle n°7 du preflight."
+            ) from exc
+        if "ThrottlingException" in message or "TooManyRequests" in message:
+            raise AgentError(
+                "Bedrock limite le débit. Sur un compte partagé, six binômes qui\n"
+                "  interrogent l'agent en même temps saturent le quota par minute.\n"
+                "  Corriger : relancer dans quelques secondes."
+            ) from exc
+        raise AgentError(f"L'agent a échoué : {type(exc).__name__} — {message}") from exc
+
+    texte = str(reponse).strip()
+
+    # Un seul nouvel essai. Le défaut est intermittent : redemander suffit presque
+    # toujours. Insister davantage coûterait des tokens sans rien changer, et masquerait
+    # un vrai problème de configuration.
+    if _est_un_appel_en_texte(texte):
+        try:
+            texte = str(
+                agent(
+                    "Ta réponse précédente contenait un appel d'outil au format JSON au "
+                    "lieu de l'exécuter. Exécute l'outil, puis réponds en français."
+                )
+            ).strip()
+        except Exception:  # noqa: BLE001
+            pass
+
+    if _est_un_appel_en_texte(texte):
+        raise AgentError(
+            "Le modèle a écrit son appel d'outil au lieu de l'exécuter, deux fois de"
+            " suite.\n"
+            "  C'est un comportement intermittent de ce modèle sur les questions qui"
+            " enchaînent\n"
+            "  plusieurs outils. Corriger : reposer la question en une seule demande à la"
+            " fois."
+        )
+
+    return Trace(
+        question=question,
+        reponse=texte,
+        outils_appeles=tuple(dict.fromkeys(appeles)),
+    )

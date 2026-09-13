@@ -37,8 +37,7 @@ def _echantillon():
     une application inutilisable. C'est le même mode d'échec que le préfixe d'URL de D12,
     et il est tout aussi invisible depuis l'extérieur.
     """
-    # TODO-D2-01 — à écrire.
-    raise NotImplementedError("TODO-D2-01")
+    return inference.read_sample(inference.local_sample())
 
 
 st.title("Contrôle qualité — assistance à la décision")
