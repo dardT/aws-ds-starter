@@ -162,6 +162,60 @@ variable "workstation_disk_gb" {
   default     = 50
 }
 
+variable "create_ide_gateway" {
+  description = <<-EOT
+    Crée la passerelle IDE navigateur (code-server) pour les machines de travail — un
+    second ALB internet-facing, ports 10001-10009, un par binôme (voir `ide.tf` et
+    PLAN.md). `false` par défaut, même garde-fou de coût que `create_mlflow` /
+    `create_workstations` : la première exposition internet du compte ne doit pas
+    exister avant qu'on en ait explicitement besoin.
+
+    Nécessite `create_workstations = true` — la passerelle attache le port 8080 des
+    machines de travail déjà créées, elle n'a aucun sens sans elles.
+  EOT
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.create_ide_gateway || var.create_workstations
+    error_message = "create_ide_gateway nécessite create_workstations = true."
+  }
+}
+
+variable "ide_gateway_teams" {
+  description = <<-EOT
+    Sous-ensemble d'équipes qui reçoivent la passerelle IDE navigateur quand
+    `create_ide_gateway = true`. `null` (défaut) = le même sous-ensemble que
+    `workstation_teams` (donc `teams` en entier si celle-ci vaut aussi `null`).
+
+    Délibérément DÉCORRÉLÉE de `workstation_teams` : dans ce socle, les machines de
+    travail sont déjà VIVANTES pour toute la promotion (contrainte dure de PLAN.md —
+    rien ne doit stopper/remplacer une instance en cours d'usage). Réduire
+    `workstation_teams` réduirait aussi le for_each de `aws_instance.workstation`
+    (workstations.tf) et DÉTRUIRAIT les instances des équipes retirées de la liste.
+
+    `ide_gateway_teams` permet de tester la passerelle sur une seule équipe (ou une
+    poignée), par exemple `ide_gateway_teams = ["g08"]`, sans toucher au for_each des
+    machines existantes — seules les ressources ide.tf de cette équipe sont créées.
+    `make ide-credentials` / `make ide-check` acceptent la même restriction via la
+    variable d'environnement IDE_TEAMS (ex. `IDE_TEAMS=g08 make ide-check`).
+  EOT
+  type        = list(string)
+  default     = null
+
+  validation {
+    // Chaque équipe visée doit avoir une machine de travail RÉELLE :
+    // aws_lb_target_group_attachment.ide (ide.tf) indexe aws_instance.workstation par
+    // TEAM_ID, et un for_each sur une équipe sans instance ferait échouer l'apply
+    // (index invalide), pas juste laisser une ressource orpheline — même piège que
+    // celui documenté pour workstation_teams plus haut.
+    condition = var.ide_gateway_teams == null || alltrue([
+      for t in coalesce(var.ide_gateway_teams, []) : contains(coalesce(var.workstation_teams, var.teams), t)
+    ])
+    error_message = "Chaque entrée de ide_gateway_teams doit avoir une machine de travail existante (voir workstation_teams)."
+  }
+}
+
 // =====================================================================================
 // Tranche 3 — MLflow et alarmes
 // =====================================================================================

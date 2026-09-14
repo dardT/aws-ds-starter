@@ -457,6 +457,21 @@ data "aws_iam_policy_document" "workstation" {
     resources = ["*"] // logs:CreateLogGroup n'accepte pas de restriction par ressource
   }
 
+  // --- IDE navigateur : lire son propre mot de passe code-server -----------------------
+  // Ajouté pour la passerelle IDE navigateur (ide.tf, PLAN.md). Le script poussé par
+  // `aws_ssm_association.code_server_setup` tourne SUR la machine, avec ce rôle : sans
+  // cette lecture, code-server démarrerait avec un mot de passe généré au hasard à
+  // chaque démarrage au lieu de celui distribué par `make ide-credentials` (voir
+  // ide_setup.sh.tftpl). Statement présent même quand create_ide_gateway vaut false —
+  // une permission de lecture sur un paramètre qui n'existe pas encore est sans effet,
+  // et ça évite un cycle de dépendance entre la politique et la passerelle.
+  statement {
+    sid       = "SonPropreMotDePasseCodeServer"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = ["arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/qc/${each.key}/code-server-password"]
+  }
+
   // --- Actions sans restriction possible par ressource ----------------------------------------
   //
   // AWS ne permet pas de scoper ces actions. Elles sont en LECTURE ou en découverte : un

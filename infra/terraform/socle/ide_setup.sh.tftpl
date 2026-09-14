@@ -1,0 +1,50 @@
+#!/bin/bash
+set -euo pipefail
+
+# Installation code-server pour le binome ${team_id} — poussee par Terraform
+# (aws_ssm_association.code_server_setup, ide.tf), une fois par equipe, sur le canal
+# SSM deja utilise par Session Manager. Idempotent : peut etre rejoue sans effet de
+# bord via `aws ssm start-associations-once --association-ids <id>`.
+#
+# N'installe que code-server et n'ecrit que sa propre configuration — aucun contact
+# avec Docker, le clone git de l'apprenant, ou tout autre service de la machine.
+
+# SSM Run Command n'exporte PAS $HOME (contrairement à un vrai shell de connexion),
+# quel que soit l'utilisateur sous lequel l'agent exécute réellement la commande —
+# root par défaut sur la plupart des AMI, mais pas garanti sur toutes. Le script
+# d'installation officiel de code-server lit $HOME (sous `set -u`) pour choisir son
+# répertoire — sans cette ligne, il échoue immédiatement avec
+# « HOME: parameter not set », avant même de télécharger quoi que ce soit. Constaté
+# le 15/09/2026 : `describe-association-execution-targets` montrait Failed, la cible
+# ALB restait unhealthy, et /healthz ne répondait jamais.
+#
+# Résolu dynamiquement plutôt que codé en dur sur /root : fonctionne que l'agent
+# tourne en root (cas attendu) ou, si un jour l'AMI dorée change ce comportement,
+# sous l'utilisateur ubuntu.
+export HOME="$(getent passwd "$(id -un)" | cut -d: -f6)"
+
+curl -fsSL https://code-server.dev/install.sh | sh
+
+PASSWORD=$(aws ssm get-parameter \
+  --region "${region}" \
+  --name "/qc/${team_id}/code-server-password" \
+  --with-decryption \
+  --query "Parameter.Value" \
+  --output text)
+
+mkdir -p /home/ubuntu/.config/code-server
+
+# Le champ password n'est pas facultatif : sans lui, code-server genere un mot de
+# passe aleatoire a chaque demarrage et ne l'ecrit que dans son propre journal —
+# `make ide-credentials` distribuerait alors une valeur qui ne correspond a rien.
+cat > /home/ubuntu/.config/code-server/config.yaml <<CONFIG
+bind-addr: 0.0.0.0:8080
+auth: password
+password: $PASSWORD
+cert: false
+CONFIG
+
+chmod 600 /home/ubuntu/.config/code-server/config.yaml
+chown -R ubuntu:ubuntu /home/ubuntu/.config/code-server
+
+systemctl enable --now code-server@ubuntu

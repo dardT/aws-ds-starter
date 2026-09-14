@@ -129,6 +129,17 @@ output "workstation_instance_ids" {
   value       = { for t, i in aws_instance.workstation : t => i.id }
 }
 
+output "ide_alb_dns_name" {
+  description = <<-EOT
+    Nom DNS de la passerelle IDE navigateur (ide.tf). Vide tant que create_ide_gateway
+    vaut false. Le port de chaque binôme n'est pas une sortie séparée : il se dérive
+    de la même formule déterministe que la priorité de règle ALB dans alb_teams.tf —
+    10000 + les deux chiffres du TEAM_ID (g01 → 10001, …) — utilisée par
+    `make ide-credentials` et `make ide-check`.
+  EOT
+  value       = try(aws_lb.ide[0].dns_name, "")
+}
+
 output "workstation_profile_names" {
   description = <<-EOT
     Profils d'instance, par binôme. C'est eux qui portent l'isolation entre groupes

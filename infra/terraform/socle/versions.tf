@@ -9,5 +9,12 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    // Genere le mot de passe code-server de chaque binome (ide.tf). Sans cette
+    // entree, `terraform init` echoue des l'apparition de `random_password` — pas
+    // `apply`, ce qui rend l'oubli visible tout de suite.
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 }

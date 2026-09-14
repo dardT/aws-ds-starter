@@ -8,7 +8,8 @@
         socle-plan socle-apply socle-destroy backend-hcl  \
         team-init team-plan team-apply team-destroy   \
           check-day1 check-day2 check-day3 \
-        restore-day1 restore-day2   destroy sync test ci  lock
+        restore-day1 restore-day2   destroy sync test ci  lock \
+        ide-credentials ide-check
 
 UV := uv run
 
@@ -88,6 +89,14 @@ socle-destroy: ## [formateur] Détruit le socle en fin de formation
 	@echo "Le bucket d'état survit volontairement (prevent_destroy)."
 	@echo "Le supprimer à la main une fois la formation clôturée."
 
+# --- Passerelle IDE navigateur (code-server), côté formateur ------------------
+
+ide-credentials: ## [formateur] Tableau TEAM_ID -> URL -> mot de passe code-server, pour la distribution au lancement
+	@$(UV) scripts/ide_credentials.py
+
+ide-check: ## [formateur] Vérifie que /healthz répond pour la passerelle IDE de chaque équipe
+	@$(UV) scripts/ide_check.py
+
 # --- Module team, côté apprenant ----------------------------------------------
 
 TF_TEAM := infra/terraform/team
@@ -143,7 +152,12 @@ check-day2: ## Vérifie l'état AWS attendu en fin de J2
 check-day3: ## Vérifie l'état AWS attendu en fin de J3
 	@$(UV) scripts/check_day3.py
 
-
+env-from-tf: ## Renseigne le .env depuis les sorties Terraform (jamais à la main)
+	@test -n "$(TEAM_ID)" || (echo "Usage : make env-from-tf TEAM_ID=g01"; exit 1)
+	@cd $(TF_SOCLE) && terraform output -json env_fragment \
+	  | jq -r '.["$(TEAM_ID)"]'
+	@echo ""
+	@echo "Reporter ces lignes dans .env — ou rediriger cette sortie."
 
 # --- Reprise ------------------------------------------------------------------
 
@@ -193,4 +207,3 @@ destroy: ## Supprime ce que les labs facturent — endpoint puis service ECS
 	@echo ""
 	@echo "L'image ECR et l'artefact S3 restent : ils ne coûtent presque rien et"
 	@echo "permettent de redéployer sans reconstruire. make socle-destroy les emporte."
-
