@@ -97,6 +97,9 @@ ide-credentials: ## [formateur] Tableau TEAM_ID -> URL -> mot de passe code-serv
 ide-check: ## [formateur] Vérifie que /healthz répond pour la passerelle IDE de chaque équipe
 	@$(UV) scripts/ide_check.py
 
+ssh-tunnel: ## Ouvre un tunnel SSM vers la machine de l'équipe, sans AWS CLI (Windows)
+	@$(UV) scripts/ssm_ssh_tunnel.py $(ARGS)
+
 # --- Module team, côté apprenant ----------------------------------------------
 
 TF_TEAM := infra/terraform/team
