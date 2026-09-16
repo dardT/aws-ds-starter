@@ -37,6 +37,8 @@ où elles ont été prises. L'index ci-dessous sert à naviguer.
 | D25 | La régression logistique remplace XGBoost (mode script SKLearn) | actif |
 | D26 | La capture se filtre par `inferenceTime`, pas par date de fichier | actif |
 | D27 | ECS Exec = canal SSM du formateur, exige `ssmmessages` | actif |
+| D28 | Passerelle IDE en HTTPS sur `vsc0de.fr`, chemin `/gNN/` via nginx | actif |
+| D29 | Passerelle IDE sur le sous-domaine `ide.vsc0de.fr`, pas l'apex | actif |
 
 ## D1 — Groupes et TEAM_ID
 - Travail en **binômes** (annule et remplace la recommandation trinômes de §4).
@@ -663,3 +665,82 @@ Une suite qui ne prétend pas joindre AWS doit passer sans aucun identifiant.
   l'agent dit qu'il a démarré, pas qu'il a pu ouvrir son canal.
 - Correctif dans le socle (`OuvrirLeCanalExecSSM`, `socle/iam.tf`), appliqué aux six
   rôles. La campagne navigateur du 29/07 (captures du J2) est passée par ce tunnel.
+
+## D28 — La passerelle IDE passe en HTTPS sur `vsc0de.fr`, routée par chemin (15/09/2026)
+
+- **Revirement assumé sur le « pas de domaine, pas de TLS »** de PLAN.md (section
+  Non-goals). Ce choix n'était pas une position de principe : personne ne possédait de
+  domaine, et un certificat public ACM ne peut pas être émis pour le nom DNS par défaut
+  d'un ALB (AWS ne délègue pas `elb.amazonaws.com`, même raisonnement que le bloc HTTPS
+  écrit-mais-non-appliqué de `socle/alb.tf`). Le formateur ayant enregistré `vsc0de.fr`,
+  la contrainte tombe : la passerelle n'écoute plus qu'en **HTTPS**, le `:80` ne sert
+  que la redirection 301.
+- **Chemin littéral, pas de sous-domaine par binôme.** `https://vsc0de.fr/g01/`,
+  `/g02/`, … — demande explicite du commanditaire. Un `g01.vsc0de.fr` aurait exigé un
+  certificat joker et neuf enregistrements à créer à la main chez le registrar, pour un
+  résultat identique côté apprenant. Le routage par chemin aligne en plus la passerelle
+  IDE sur la convention déjà en place pour Streamlit (décision D12).
+- **Le routage par chemin exige un nginx sur chaque machine.** Une règle
+  `path_pattern` d'ALB transmet le chemin **tel quel** à la cible : l'ALB ne sait pas
+  retirer un préfixe. Streamlit s'en sort avec `--server.baseUrlPath` (D12) ;
+  code-server n'a **aucun équivalent**, et recevoir `/g01/…` lui fait chercher ses
+  ressources statiques au mauvais endroit — page blanche. Un nginx minimal écoute donc
+  en `:8081`, retire le préfixe grâce à la barre oblique finale de
+  `proxy_pass http://127.0.0.1:8080/;`, et relaie vers le code-server local. Cette barre
+  oblique **est** tout le mécanisme. Les en-têtes `Upgrade` / `Connection` l'accompagnent
+  obligatoirement : sans elles le terminal intégré, qui repose sur des websockets, reste
+  noir et se reconnecte en boucle.
+- **Conséquences d'architecture** :
+  - le port exposé par le groupe de sécurité des machines passe de 8080 à **8081** ;
+    code-server ne traverse plus jamais ce groupe, il n'est joignable que par la boucle
+    locale de sa propre machine ;
+  - la sonde de santé du groupe de cibles devient `/<TEAM_ID>/healthz`, **préfixée**
+    puisqu'elle traverse nginx — même piège que celui déjà documenté pour le
+    `/_stcore/health` de Streamlit dans `alb_teams.tf` ;
+  - les neuf écouteurs « un port par binôme » (10001-10009) laissent place à **un seul**
+    écouteur `:443` partagé, action par défaut en 404 explicite, plus une
+    `aws_lb_listener_rule` par binôme — priorité et double motif `["/gNN", "/gNN/*"]`
+    repris à l'identique de `alb_teams.tf` ;
+  - `make ide-credentials` et `make ide-check` ne calculent plus de port : ils lisent le
+    domaine dans la nouvelle sortie `ide_domain_name`.
+- **Le DNS reste HORS de Terraform, et c'est délibéré.** `vsc0de.fr` est enregistré chez
+  Hostinger, pas délégué à Route 53 : aucune `aws_route53_zone` ni `aws_route53_record`
+  dans ce socle, et il ne faut pas en ajouter — la zone n'appartient pas à ce compte AWS.
+  Deux gestes manuels en découlent :
+  1. le CNAME de validation ACM, à lire dans `terraform output
+     ide_certificate_validation_records` et à créer dans le panneau DNS de Hostinger
+     (hPanel → Domaines → DNS / Zone DNS) ;
+  2. un enregistrement **ALIAS / ANAME** à l'apex pointant sur `terraform output
+     ide_alb_dns_name`. Ni CNAME (illégal à la racine d'une zone) ni A (un ALB n'a pas
+     d'IP fixe) ne conviennent — c'est le piège classique du domaine apex.
+- **Le premier `terraform apply` SE FIGE, ce n'est pas une panne.**
+  `aws_acm_certificate_validation.ide` interroge ACM en boucle (jusqu'à 45 min) tant que
+  le CNAME du point 1 n'existe pas. Marche à suivre : lancer un premier apply, le laisser
+  bloquer ou l'interrompre, lire la sortie, créer l'enregistrement, relancer. Les applys
+  suivants ne bloquent plus.
+- Ce qui ne bouge pas : l'authentification reste le mot de passe code-server par équipe
+  (toujours pas de Cognito), et `aws_instance.workstation` n'est toujours touché **nulle
+  part** — nginx arrive par le même canal SSM `AWS-RunShellScript` que code-server,
+  idempotent, sans redémarrage, jamais par `user_data` (contrainte dure de PLAN.md).
+
+## D29 — La passerelle IDE vit sur le sous-domaine `ide.vsc0de.fr`, pas l'apex (15/09/2026)
+
+- **Précision apportée après coup à D28**, qui envisageait un enregistrement à l'apex de
+  `vsc0de.fr` (ALIAS/ANAME, seule option puisqu'un CNAME est illégal à la racine d'une
+  zone). Dans la pratique, le formateur a créé un **CNAME classique** pour le
+  sous-domaine `ide.vsc0de.fr` pointant vers `terraform output ide_alb_dns_name` — un
+  geste DNS standard, supporté partout (y compris chez Hostinger), sans dépendre d'un
+  type de record propriétaire au registrar.
+- **`variable "ide_domain_name"` vaut donc `"ide.vsc0de.fr"`**, pas `"vsc0de.fr"` —
+  mis à jour dans `terraform.tfvars.example`. Le certificat ACM (`aws_acm_certificate.ide`,
+  `ide.tf`) suit automatiquement puisqu'il est émis pour `var.ide_domain_name`, quel que
+  soit le nom qu'elle contient ; aucun changement de ressource, seulement de valeur.
+- **Conséquence documentaire** : les commentaires de `ide.tf`, `outputs.tf` et
+  `terraform.tfvars.example` qui décrivaient le piège classique de l'apex (« ni CNAME, ni
+  A ») ont été corrigés pour décrire ce qui est réellement en place — un CNAME de
+  sous-domaine, plus simple que ce que D28 anticipait. `vsc0de.fr` lui-même reste libre
+  pour un usage futur, ce qui n'était qu'un effet de bord bienvenu de ce choix, pas son
+  motif premier.
+- Aucun changement côté Terraform au-delà de la valeur de la variable : les ressources
+  (`aws_acm_certificate.ide`, les écouteurs, les règles par binôme) sont paramétrées par
+  `var.ide_domain_name` depuis le départ (D28), donc agnostiques du nom exact.

@@ -132,12 +132,48 @@ output "workstation_instance_ids" {
 output "ide_alb_dns_name" {
   description = <<-EOT
     Nom DNS de la passerelle IDE navigateur (ide.tf). Vide tant que create_ide_gateway
-    vaut false. Le port de chaque binôme n'est pas une sortie séparée : il se dérive
-    de la même formule déterministe que la priorité de règle ALB dans alb_teams.tf —
-    10000 + les deux chiffres du TEAM_ID (g01 → 10001, …) — utilisée par
-    `make ide-credentials` et `make ide-check`.
+    vaut false.
+
+    C'est LA valeur à placer dans l'enregistrement CNAME de `ide_domain_name` chez le
+    registrar (Hostinger) — `ide_domain_name` est un sous-domaine (`ide.vsc0de.fr`), pas
+    l'apex de la zone, donc un simple CNAME suffit, sans ALIAS/ANAME (décision D29).
+    Étape MANUELLE, hors du champ de Terraform — la zone DNS n'est pas hébergée dans ce
+    compte AWS (décision D28).
+
+    Les binômes, eux, ne voient jamais ce nom : ils vont sur
+    `https://<ide_domain_name>/<TEAM_ID>/` (voir `make ide-credentials`).
   EOT
   value       = try(aws_lb.ide[0].dns_name, "")
+}
+
+output "ide_domain_name" {
+  description = <<-EOT
+    Domaine public de la passerelle IDE (variable `ide_domain_name`), renvoyé tel quel.
+
+    Sortie plutôt que valeur recopiée : `make ide-credentials` et `make ide-check`
+    construisent leurs URL à partir d'elle, comme tout le reste du socle lit ses noms
+    dans les sorties Terraform et jamais dans la console.
+  EOT
+  value       = var.create_ide_gateway ? var.ide_domain_name : ""
+}
+
+output "ide_certificate_validation_records" {
+  description = <<-EOT
+    Enregistrements DNS que ACM attend pour valider le certificat de la passerelle IDE,
+    à créer À LA MAIN dans le panneau DNS du registrar (Hostinger) : la zone n'est pas
+    déléguée à Route 53, Terraform ne peut donc rien y écrire (décision D28).
+
+    Tant qu'ils n'existent pas, `terraform apply` reste bloqué sur
+    `aws_acm_certificate_validation.ide` — c'est attendu, pas une panne. Lancer un
+    premier apply, lire cette sortie, créer les CNAME, relancer.
+  EOT
+  value = var.create_ide_gateway ? [
+    for o in aws_acm_certificate.ide[0].domain_validation_options : {
+      name  = o.resource_record_name
+      type  = o.resource_record_type
+      value = o.resource_record_value
+    }
+  ] : []
 }
 
 output "workstation_profile_names" {

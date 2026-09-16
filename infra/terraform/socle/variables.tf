@@ -165,13 +165,16 @@ variable "workstation_disk_gb" {
 variable "create_ide_gateway" {
   description = <<-EOT
     Crée la passerelle IDE navigateur (code-server) pour les machines de travail — un
-    second ALB internet-facing, ports 10001-10009, un par binôme (voir `ide.tf` et
-    PLAN.md). `false` par défaut, même garde-fou de coût que `create_mlflow` /
+    second ALB internet-facing, en HTTPS sur `ide_domain_name`, avec un chemin littéral
+    par binôme : `https://<domaine>/g01/`, `/g02/`, … (voir `ide.tf` et PLAN.md). Le :80
+    ne sert qu'à rediriger vers le :443, jamais à servir de contenu.
+
+    `false` par défaut, même garde-fou de coût que `create_mlflow` /
     `create_workstations` : la première exposition internet du compte ne doit pas
     exister avant qu'on en ait explicitement besoin.
 
-    Nécessite `create_workstations = true` — la passerelle attache le port 8080 des
-    machines de travail déjà créées, elle n'a aucun sens sans elles.
+    Nécessite `create_workstations = true` — la passerelle attache le port 8081 (nginx)
+    des machines de travail déjà créées, elle n'a aucun sens sans elles.
   EOT
   type        = bool
   default     = false
@@ -179,6 +182,37 @@ variable "create_ide_gateway" {
   validation {
     condition     = !var.create_ide_gateway || var.create_workstations
     error_message = "create_ide_gateway nécessite create_workstations = true."
+  }
+}
+
+variable "ide_domain_name" {
+  description = <<-EOT
+    Domaine public de la passerelle IDE navigateur — `vsc0de.fr`, possédé par le
+    formateur depuis le 15/09/2026 (décision D28, qui revient sur le « pas de domaine,
+    pas de TLS » initial de PLAN.md).
+
+    Sert à la fois de `domain_name` du certificat ACM et de nom annoncé aux binômes.
+    Le DNS est hébergé CHEZ LE REGISTRAR (Hostinger), pas dans Route 53 : Terraform ne
+    crée aucun enregistrement, il se contente d'attendre que la validation ACM passe
+    (voir `aws_acm_certificate_validation.ide` dans `ide.tf`) et de sortir les CNAME à
+    créer à la main (`terraform output ide_certificate_validation_records`).
+
+    Valeur actuelle : un sous-domaine (`ide.vsc0de.fr`), pas l'apex `vsc0de.fr` (D29) —
+    un CNAME classique dans la zone DNS de Hostinger suffit donc, pointant sur
+    `terraform output ide_alb_dns_name`. Un domaine apex aurait exigé un enregistrement
+    ALIAS/ANAME (un CNAME n'est pas légal à la racine d'une zone et l'ALB n'a pas d'IP
+    fixe) — cas évité précisément en choisissant un sous-domaine.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    // Même idiome que la garde `create_ide_gateway` ⇒ `create_workstations`
+    // ci-dessus : une passerelle sans domaine ne peut ni obtenir de certificat ACM
+    // ni écouter en HTTPS, l'apply échouerait bien plus loin sur une erreur du
+    // provider ACM, beaucoup moins lisible que ce message.
+    condition     = !var.create_ide_gateway || try(trimspace(var.ide_domain_name), "") != ""
+    error_message = "create_ide_gateway nécessite ide_domain_name (ex. \"vsc0de.fr\")."
   }
 }
 

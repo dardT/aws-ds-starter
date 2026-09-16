@@ -9,9 +9,10 @@ Génère le tableau TEAM_ID → URL → mot de passe de la passerelle IDE naviga
 formation.
 
 Même esprit que `make backend-hcl` : rien n'est recopié à la main depuis la console.
-Le port de chaque binôme n'est pas une sortie Terraform séparée — il se dérive de la
-même formule déterministe que la priorité de règle ALB dans `alb_teams.tf`
-(10000 + les deux chiffres du TEAM_ID), documentée dans `outputs.tf`.
+Depuis la décision D28 (15/09/2026), la passerelle est servie en HTTPS sur un domaine
+possédé (`ide_domain_name`, par ex. `vsc0de.fr`) et route par CHEMIN littéral —
+`https://vsc0de.fr/g01/` — au lieu du port 10000 + les deux chiffres du TEAM_ID
+d'avant. Le domaine est lu dans les sorties Terraform, jamais codé ici.
 
     make ide-credentials
 
@@ -55,15 +56,18 @@ def sortie_terraform(cle: str) -> object:
     return json.loads(resultat.stdout)
 
 
-def port_ide(team_id: str) -> int:
-    # Même formule que ide.tf : 10000 + les deux chiffres du TEAM_ID.
-    return 10000 + int(team_id[1:3])
+def url_ide(domaine: str, team_id: str) -> str:
+    # Chemin littéral, barre oblique finale comprise : c'est elle que nginx attend sur
+    # la machine (`location /<TEAM_ID>/`, ide_setup.sh.tftpl). Sans elle, l'ALB route
+    # quand même (les deux motifs sont dans la règle) mais nginx répond une 301 — autant
+    # distribuer directement l'URL définitive.
+    return f"https://{domaine}/{team_id}/"
 
 
 def main() -> int:
-    dns = sortie_terraform("ide_alb_dns_name")
-    if not dns:
-        print("ide_alb_dns_name est vide — create_ide_gateway vaut false, rien à distribuer.", file=sys.stderr)
+    domaine = sortie_terraform("ide_domain_name")
+    if not domaine:
+        print("ide_domain_name est vide — create_ide_gateway vaut false, rien à distribuer.", file=sys.stderr)
         return 1
 
     teams: list[str] = sortie_terraform("teams")
@@ -74,12 +78,12 @@ def main() -> int:
     region = os.environ.get("AWS_REGION", "eu-west-3")
     ssm = boto3.client("ssm", region_name=region)
 
-    print(f"\n  Passerelle IDE navigateur — {dns}\n")
+    print(f"\n  Passerelle IDE navigateur — https://{domaine}/\n")
     print(f"  {'TEAM_ID':<8} {'URL':<32} MOT DE PASSE")
 
     echecs: list[str] = []
     for team in teams:
-        url = f"http://{dns}:{port_ide(team)}/"
+        url = url_ide(domaine, team)
         try:
             reponse = ssm.get_parameter(Name=f"/qc/{team}/code-server-password", WithDecryption=True)
             mot_de_passe = reponse["Parameter"]["Value"]

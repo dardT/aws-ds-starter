@@ -1,13 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
-# Installation code-server pour le binome ${team_id} — poussee par Terraform
+# Installation code-server + nginx pour le binome ${team_id} — poussee par Terraform
 # (aws_ssm_association.code_server_setup, ide.tf), une fois par equipe, sur le canal
 # SSM deja utilise par Session Manager. Idempotent : peut etre rejoue sans effet de
 # bord via `aws ssm start-associations-once --association-ids <id>`.
 #
-# N'installe que code-server et n'ecrit que sa propre configuration — aucun contact
-# avec Docker, le clone git de l'apprenant, ou tout autre service de la machine.
+# N'installe que code-server et nginx, et n'ecrit que leurs propres configurations —
+# aucun contact avec Docker, le clone git de l'apprenant, ou tout autre service de la
+# machine.
+#
+# Depuis le 15/09/2026 (decision D28), la passerelle route par CHEMIN et non plus par
+# port : l'ALB envoie `/${team_id}/…` tel quel — une regle path_pattern ne sait pas
+# retirer un prefixe. C'est nginx, en :8081, qui le retire avant de relayer vers le
+# code-server local en :8080.
 
 # SSM Run Command n'exporte PAS $HOME (contrairement à un vrai shell de connexion),
 # quel que soit l'utilisateur sous lequel l'agent exécute réellement la commande —
@@ -48,3 +54,77 @@ chmod 600 /home/ubuntu/.config/code-server/config.yaml
 chown -R ubuntu:ubuntu /home/ubuntu/.config/code-server
 
 systemctl enable --now code-server@ubuntu
+
+# --- nginx : retire le prefixe /${team_id}/ avant de relayer vers code-server ---------
+#
+# `apt-get install` est deja idempotent (paquet present = no-op), mais DEBIAN_FRONTEND
+# est indispensable ici : SSM Run Command n'a pas de terminal, et la moindre invite de
+# configuration bloquerait l'association jusqu'au timeout.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y nginx
+
+cat > /etc/nginx/sites-available/qc-ide-${team_id}.conf <<'NGINX'
+server {
+    # 8081, et pas 80 : le 80 reste au site nginx par defaut le temps qu'on le retire,
+    # et surtout c'est ce port-la que le groupe de cibles ALB sonde (ide.tf).
+    listen 8081;
+    # Nom de domaine transmis par Terraform (`var.ide_domain_name`, ide.tf) plutot que
+    # code en dur ici : nginx ne voit que du HTTP derriere l'ALB (celui-ci termine le
+    # TLS), donc ce `server_name` ne sert pas a choisir un certificat, mais a rejeter
+    # les requetes qui n'arrivent pas via le nom public attendu (Host: incorrect ou
+    # absent, sonde generique par IP, etc.).
+    server_name ${domain_name};
+
+    # Sans barre oblique finale, `location /gNN/` ne correspond pas : la requete
+    # tomberait en 404 alors que l'ALB, lui, accepte les deux motifs (voir
+    # aws_lb_listener_rule.ide). On remet donc la barre nous-memes.
+    location = /${team_id} {
+        return 301 /${team_id}/;
+    }
+
+    location /${team_id}/ {
+        # LA BARRE OBLIQUE FINALE DE proxy_pass EST TOUT LE MECANISME : avec elle, nginx
+        # remplace la partie du chemin correspondant au `location` par cette barre — la
+        # requete /${team_id}/healthz devient /healthz cote code-server. Sans elle, le
+        # chemin serait transmis tel quel et code-server chercherait ses ressources
+        # statiques sous /${team_id}/, qu'il ne connait pas : page blanche.
+        proxy_pass http://127.0.0.1:8080/;
+
+        # Le terminal integre de code-server (et sa synchronisation d'editeur) passent
+        # par des websockets. Sans ces trois lignes, l'interface s'affiche mais le
+        # terminal reste noir et se reconnecte en boucle — HTTP/1.1 est requis pour le
+        # protocole d'upgrade, que nginx ne relaie pas de lui-meme.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # L'ALB terminant le TLS, nginx lui-meme ne voit que du HTTP ($scheme vaudrait
+        # donc toujours "http", peu importe comment le navigateur s'est connecte) : on
+        # relaie l'en-tete que l'ALB a deja pose plutot que de le recalculer ici.
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    }
+}
+NGINX
+
+# `ln -sfn` plutot que `ln -s` : rejouer le script ne doit pas echouer sur un lien deja
+# present (contrainte d'idempotence de l'en-tete).
+ln -sfn /etc/nginx/sites-available/qc-ide-${team_id}.conf \
+        /etc/nginx/sites-enabled/qc-ide-${team_id}.conf
+
+# Le site par defaut de Debian/Ubuntu ecoute en :80 et sert une page « Welcome to
+# nginx ». Sans interet ici, et surtout : il ne doit pas etre ce que decouvre quelqu'un
+# qui scanne la machine. `rm -f` reste un no-op au second passage.
+rm -f /etc/nginx/sites-enabled/default
+
+# Valide la configuration AVANT de recharger : un `reload` sur une conf invalide laisse
+# l'ancienne en place sans le dire, et on croirait la modification prise en compte.
+nginx -t
+
+systemctl enable nginx
+# `reload-or-restart` couvre les deux cas d'un script rejoue : nginx deja actif (on
+# recharge sans couper les sessions code-server ouvertes) ou pas encore demarre.
+systemctl reload-or-restart nginx

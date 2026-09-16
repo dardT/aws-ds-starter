@@ -16,6 +16,15 @@ teams = ["g01", "g02", "g03", "g04", "g05", "g06", "g07", "g08", "g09"]
 # à la demande. Pour un test à une seule machine : ["g01"].
 workstation_teams = ["g01", "g02", "g03", "g04", "g05", "g06", "g07", "g08"]
 
+# Passerelle IDE navigateur (code-server). `create_ide_gateway = true` exige un domaine :
+# la passerelle n'écoute qu'en HTTPS, chemin littéral par binôme — https://ide.vsc0de.fr/g01/
+# (décision D28). Sous-domaine délibéré, pas l'apex `vsc0de.fr` (D29) : un simple CNAME
+# suffit, pas d'ALIAS/ANAME. Le DNS est chez Hostinger, pas dans Route 53 : après le premier
+# apply, créer à la main les CNAME de `terraform output ide_certificate_validation_records`,
+# puis un CNAME `ide_domain_name` → `terraform output ide_alb_dns_name`.
+create_ide_gateway = false
+ide_domain_name    = "ide.vsc0de.fr"
+
 # Rétentions. Celle des logs est aussi ce que les binômes modifient au J3.
 log_retention_days  = 7
 data_retention_days = 30
